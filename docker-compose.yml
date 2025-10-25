@@ -1,0 +1,51 @@
+version: "3.8"
+
+services:
+  nginx:
+    image: nginx:1.25
+    container_name: nginx
+    ports:
+      - "8080:80" # public entrypoint
+    volumes:
+      - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
+      - ./nginx/render_and_run.sh:/docker-entrypoint.d/render_and_run.sh:ro
+    environment:
+      ACTIVE_POOL: "${ACTIVE_POOL}"
+    depends_on:
+      - app_blue
+      - app_green
+    networks:
+      - cg_net
+    restart: unless-stopped
+
+  app_blue:
+    image: "${BLUE_IMAGE}"
+    platform: linux/amd64
+    container_name: app_blue
+    environment:
+      - PORT=${PORT}
+      - RELEASE_ID=${RELEASE_ID_BLUE}
+      - APP_POOL=blue
+    ports:
+      - "8081:${PORT}" # grader will call /chaos/* directly here
+    networks:
+      - cg_net
+    restart: unless-stopped
+
+  app_green:
+    image: "${GREEN_IMAGE}"
+    platform: linux/amd64
+    container_name: app_green
+    environment:
+      - PORT=${PORT}
+      - RELEASE_ID=${RELEASE_ID_GREEN}
+      - APP_POOL=green
+    ports:
+      - "8082:${PORT}" # grader will call /chaos/* directly here
+    networks:
+      - cg_net
+    restart: unless-stopped
+
+networks:
+  cg_net:
+    driver: bridge
