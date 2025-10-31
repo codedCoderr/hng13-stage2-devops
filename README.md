@@ -1,60 +1,74 @@
 ```markdown
-# 🚀 HNG Stage 2 — Blue/Green Deployment with Nginx (Auto-Failover + Manual Toggle)
+# 🚀 HNG Stage 2 — Blue/Green Deployment with Nginx (Auto-Failover + Observability)
 
 ## 🧭 Overview
 
-This project implements a **Blue/Green Deployment** architecture using **Docker Compose** and **Nginx** as a reverse proxy.
+This project implements a **Blue/Green Deployment** architecture using **Docker Compose** and **Nginx** as a reverse proxy with **automatic failover** and **operational visibility**.
 
-Two identical Node.js services — **Blue (active)** and **Green (backup)** — are deployed behind Nginx.
-Nginx handles **automatic failover** so that if Blue fails (via simulated chaos), all traffic switches to Green **with zero downtime**.
+Two identical Node.js services — **Blue (active)** and **Green (backup)** — are deployed behind Nginx.  
+Nginx handles automatic failover, and a **Python log watcher** monitors Nginx logs to post **Slack alerts** for:
+
+- Pool failovers (Blue → Green, Green → Blue)
+- Elevated upstream 5xx error rates (> configured threshold)
 
 ---
 
 ## 🧱 Architecture
+
 ```
 
 ```
-      ┌────────────┐
-      │   Client   │
-      └─────┬──────┘
-            │  (http://localhost:8080)
-     ┌──────▼──────┐
-     │    Nginx    │  ← reverse proxy + load balancer
-     └──────┬──────┘
+  ┌────────────┐
+  │   Client   │
+  └─────┬──────┘
+        │  (http://localhost:8080)
+ ┌──────▼──────┐
+ │    Nginx    │  ← reverse proxy + load balancer + structured logs
+ └──────┬──────┘
 ```
 
 ┌─────────────┴─────────────┐
-│ │
-┌──▼───┐ ┌────▼───┐
-│ Blue │ 8081 │ Green │ 8082
-└──────┘ └────────┘
+│                             │
+┌──▼───┐                   ┌──▼───┐
+│ Blue │ 8081              │ Green│ 8082
+└──────┘                   └──────┘
 
 ````
 
 ---
 
 ## ⚙️ Features
-- **Automatic failover:** Nginx retries to Green when Blue returns 5xx or times out.
-- **Health-based detection:** Tight timeouts and fail thresholds trigger switch fast.
-- **Header forwarding:** `X-App-Pool` and `X-Release-Id` headers preserved.
-- **Chaos testing:** Use `/chaos/start` to simulate Blue failure.
+
+- **Automatic failover:** Nginx retries to Green if Blue returns 5xx or times out.
+- **Structured Nginx logs:** Capture `pool`, `release`, `upstream_status`, `request_time`, `upstream_response_time`, `upstream_addr`.
+- **Operational visibility:** Python watcher tails logs and posts alerts to Slack.
+- **Failover & error-rate detection:** Rolling window monitors upstream 5xx rates and pool flips.
+- **Rate-limited Slack alerts:** Prevents alert spam via cooldown configuration.
+- **Chaos testing:** Use `/chaos/start` to simulate failure scenarios.
 
 ---
 
 ## 🧩 Environment Variables
-All configuration is parameterized in a `.env` file (used by Docker Compose).
+
+All configuration is parameterized in `.env`:
 
 ```bash
 # .env
 BLUE_IMAGE=yimikaade/wonderful:devops-stage-two
 GREEN_IMAGE=yimikaade/wonderful:devops-stage-two
 
-ACTIVE_POOL=blue        # Controls which pool is primary by default (blue or green)
+ACTIVE_POOL=blue         # Default primary pool (blue or green)
 
-RELEASE_ID_BLUE=1.0.0
-RELEASE_ID_GREEN=1.0.0
+RELEASE_ID_BLUE=blue-v1.0.0
+RELEASE_ID_GREEN=green-v1.0.0
 
-PORT=3000               # Internal app port (default: 3000)
+PORT=3000                # Internal app port
+
+# Operational visibility
+SLACK_WEBHOOK_URL=https://hooks.slack.com/services/XXX/YYY/ZZZ
+ERROR_RATE_THRESHOLD=2    # % 5xx rate to trigger alert
+WINDOW_SIZE=200           # Number of recent requests in rolling window
+ALERT_COOLDOWN_SEC=300    # Seconds between repeated alerts
 ````
 
 ---
@@ -75,12 +89,13 @@ docker compose down
 docker compose up -d
 ```
 
-You should see 3 running containers:
+Containers running:
 
 ```
 nginx
 app_blue
 app_green
+alert_watcher
 ```
 
 ### 3️⃣ Verify services
@@ -91,7 +106,7 @@ app_green
 | Blue Direct        | [http://localhost:8081](http://localhost:8081) | Blue service (primary)              |
 | Green Direct       | [http://localhost:8082](http://localhost:8082) | Green service (backup)              |
 
-Check version:
+Check version and headers:
 
 ```bash
 curl -i http://localhost:8080/version
@@ -101,29 +116,32 @@ Expected headers:
 
 ```
 X-App-Pool: blue
-X-Release-Id: <RELEASE_ID_BLUE>
+X-Release-Id: blue-v1.0.0
 ```
 
 ---
 
-## 💥 Testing Failover
+## 💥 Testing Failover & Alerts
 
-Simulate a Blue failure and confirm Nginx automatically switches to Green.
+### Simulate Blue failure
 
 ```bash
-# Start chaos on Blue
 curl -X POST http://localhost:8081/chaos/start?mode=error
+```
 
-# Verify failover
+### Verify failover & watcher alerts
+
+```bash
 ./verify_failover.sh
 ```
 
-Example successful output:
+* Failover to Green triggers a Slack alert.
+* Elevated upstream 5xx error rate triggers a Slack alert.
+* Example Slack alert:
 
 ```
-Baseline check (expect X-App-Pool: blue)
-Starting chaos on Blue...
-PASS: Failover succeeded and responses are from green
+:warning: Failover detected: blue → green
+:rotating_light: High upstream error rate: 5.2% over last 200 requests
 ```
 
 ---
@@ -132,10 +150,18 @@ PASS: Failover succeeded and responses are from green
 
 ```
 .
-├── docker-compose.yml      # Orchestrates Nginx, Blue, and Green containers
-├── nginx.conf.template     # Nginx config with dynamic upstreams
-├── .env                    # Environment variables
-├── verify_failover.sh      # Automated test script for failover
+├── docker-compose.yml      # Orchestrates Nginx, Blue, Green, and watcher
+├── nginx/
+│   ├── nginx.conf.template # Nginx config with dynamic upstreams
+│   └── render_and_run.sh   # Entrypoint script to render upstreams
+├── alert_watcher/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── watcher.py          # Python log watcher with Slack alerts
+├── .env                    # Environment variables (not committed)
+├── .env.example            # Template for env
+├── verify_failover.sh      # Automated failover test
+├── runbook.md              # Operator instructions and alert meanings
 └── README.md               # Documentation
 ```
 
@@ -151,21 +177,25 @@ docker compose down
 
 ## 🧾 Notes
 
-- Nginx automatically retries failed requests to the backup (Green) upstream.
-- No client requests should ever fail during a Blue outage.
-- You can switch the active pool manually by updating `ACTIVE_POOL` in `.env` and reloading Nginx:
+* Nginx automatically retries failed requests to the backup upstream.
+* Python watcher reads Nginx logs in real-time to detect failovers and high error rates.
+* Operator-friendly runbook is provided (`runbook.md`).
+* Manual pool switching:
 
-  ```bash
-  docker exec -it nginx nginx -s reload
-  ```
+```bash
+# Change ACTIVE_POOL in .env and reload Nginx
+docker exec -it nginx nginx -s reload
+```
 
 ---
 
 ## 🏁 Verification Criteria
 
-✅ All traffic routed to Blue by default
-✅ Nginx forwards `X-App-Pool` and `X-Release-Id` headers
-✅ On Blue failure → traffic instantly switches to Green
+✅ Traffic routes to Blue by default
+✅ Nginx logs show `pool`, `release`, `upstream_status`, `request_time`, `upstream_response_time`, `upstream_addr`
+✅ Failover triggers Slack alert
+✅ High error-rate triggers Slack alert
+✅ Alerts respect cooldowns
 ✅ `verify_failover.sh` passes with 0 failed requests
 
 ---
@@ -174,7 +204,5 @@ docker compose down
 
 **Busola Olowu**
 DevOps Engineer Intern — HNG Internship Stage 2
-
-```
 
 ```

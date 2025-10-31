@@ -1,5 +1,4 @@
 version: "3.8"
-
 services:
   nginx:
     image: nginx:1.25
@@ -9,6 +8,7 @@ services:
     volumes:
       - ./nginx/nginx.conf.template:/etc/nginx/nginx.conf.template:ro
       - ./nginx/render_and_run.sh:/docker-entrypoint.d/render_and_run.sh:ro
+      - ./logs:/var/log/nginx
     environment:
       ACTIVE_POOL: "${ACTIVE_POOL}"
     depends_on:
@@ -45,7 +45,23 @@ services:
     networks:
       - cg_net
     restart: unless-stopped
-
+  alert_watcher:
+    build:
+      context: ./alert_watcher
+    container_name: alert_watcher
+    environment:
+      SLACK_WEBHOOK_URL: "${SLACK_WEBHOOK_URL}"
+      ERROR_RATE_THRESHOLD: "${ERROR_RATE_THRESHOLD:-2}"
+      WINDOW_SIZE: "${WINDOW_SIZE:-200}"
+      ALERT_COOLDOWN_SEC: "${ALERT_COOLDOWN_SEC:-300}"
+    volumes:
+      - ./alert_watcher/watcher.py:/app/watcher.py # host file replaces container file
+      - ./logs:/var/log/nginx # access logs
+    working_dir: /app
+    command: python -u watcher.py
+    restart: always
+    depends_on:
+      - nginx
 networks:
   cg_net:
     driver: bridge

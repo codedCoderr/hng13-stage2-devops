@@ -1,1 +1,7 @@
 .env
+# Nginx logs
+logs/
+*.log
+
+# Docker watcher logs if any
+alert_watcher/*.log
